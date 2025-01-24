@@ -342,7 +342,10 @@ class KAN_es(KAN):
 def cross_val_KAN_es(X, y, 
                      d_kan_params, d_train_params,
                      validation_train_ration = 0.22,
-                     cv = 5, l_func_metrics = [root_mean_squared_error, mean_absolute_error, r2_score]):
+                     cv = 5, l_func_metrics = [root_mean_squared_error, mean_absolute_error, r2_score],
+                     x_scaler = 1,
+                     y_scaler = 1,
+                     split_trn_vld_tst = False):
     '''
     Provides cross-validation to a KAN_es model.
     
@@ -354,50 +357,78 @@ def cross_val_KAN_es(X, y,
             The target values (class labels in classification, real numbers in
             regression).
         d_kan_params : dic
-            dictionary for KAN_es initialisation
+            dictionary for KAN_es initialisation.
         d_train_params : dic
-            dictionary for KAN_es training
+            dictionary for KAN_es training.
         validation_train_ration : float            
-            Validation / (Train+Validation)
+            Validation / (Train+Validation).
         cv : int
-            number of folds, seperating training and validation datasets
+            number of folds, seperating training and validation datasets.
         l_func_metrics : List[callable]
             list of metrics for evaluating over test data.
+        x_scaler : skl scaler
+            x-scaler for fitting and transforming over train_data.
+        y_scaler : skl scaler
+            y (label)-scaler. Used only for reverse scaling of y.
+        split_trn_vld_tst : bool
+            if True, splitting all data into 3 sets. Evaluating metrices on test set, which didn`t take part into training model at all.
+            if False, splitting all data into 2 sets (the same as in skl cross-validate). Evaluating metrices on 'test' set.
             
     Returns:
         l_metrics : np.array
             2D matrix of evaluated metrics with shape [len(l_func_metrics), cv]
     '''
     
-    kf = KFold(n_splits = cv)
+    kf = KFold(n_splits = cv, shuffle=True)
 
     m_metrics = []
     
-
     for i, (train_index, test_index) in enumerate(kf.split(X)):
         x_train = X[train_index]
         x_test = X[test_index]
         y_train = y[train_index]
         y_test = y[test_index]
         
-        x_train_1, x_val, y_train_1, y_val = train_test_split(x_train, y_train, 
-                                                    test_size=validation_train_ration,
-                                                    random_state=i)
+        if split_trn_vld_tst:
+            x_train_1, x_val, y_train_1, y_val = train_test_split(x_train, y_train, 
+                                                        test_size=validation_train_ration,
+                                                        random_state=i)
         
-        kf_dataset = {'train_input': torch.tensor(x_train_1, dtype=torch.float),
-                      'train_label': torch.tensor(y_train_1, dtype=torch.float),
-                      'val_input': torch.tensor(x_val, dtype=torch.float),
-                      'val_label': torch.tensor(y_val, dtype=torch.float),
-                      'test_input': torch.tensor(x_test, dtype=torch.float),
-                      'test_label': torch.tensor(y_test, dtype=torch.float)}
+            if x_scaler!=1:
+                x_train_1 = x_scaler.fit_transform(x_train_1)
+                x_val = x_scaler.transform(x_val)
+                x_test = x_scaler.transform(x_test)
+        
+            kf_dataset = {'train_input': torch.tensor(x_train_1, dtype=torch.float),
+                          'train_label': torch.tensor(y_train_1, dtype=torch.float),
+                          'val_input': torch.tensor(x_val, dtype=torch.float),
+                          'val_label': torch.tensor(y_val, dtype=torch.float),
+                          'test_input': torch.tensor(x_test, dtype=torch.float),
+                          'test_label': torch.tensor(y_test, dtype=torch.float)}
+        else:
+            if x_scaler!=1:
+                x_train = x_scaler.fit_transform(x_train)
+                x_test = x_scaler.transform(x_test)
+                
+            kf_dataset = {'train_input': torch.tensor(x_train, dtype=torch.float),
+                          'train_label': torch.tensor(y_train, dtype=torch.float),
+                          'val_input': torch.tensor(x_test, dtype=torch.float),
+                          'val_label': torch.tensor(y_test, dtype=torch.float),
+                          'test_input': torch.tensor(x_test, dtype=torch.float), # maybe set it to []?
+                          'test_label': torch.tensor(y_test, dtype=torch.float)} # maybe set it to []?
 
         model = KAN_es(**d_kan_params)
         print(f'kfold: {i}')
         results = model.train_es(kf_dataset, **d_train_params)
 
         test_pred = model.forward(kf_dataset['test_input']).detach().numpy() #.to(device)
+        test_label = kf_dataset['test_label'].detach().numpy()
+        
+        if y_scaler!=1:
+            test_pred = y_scaler.inverse_transform(test_pred.reshape([-1,1]))
+            test_label = y_scaler.inverse_transform(test_label.reshape([-1,1]))
 
-        new_metrics = [metric(test_pred, kf_dataset['test_label']) for metric in l_func_metrics]
+        new_metrics = [metric(test_label, test_pred) for metric in l_func_metrics]
         m_metrics.append(new_metrics)
         
     model.plot()
@@ -407,7 +438,8 @@ def cross_val_KAN_es(X, y,
     return l_metrics
 
 
-def kfold_experiment_es(l_X, l_y, l_d_kan_params, l_d_train_params, l_func_metrics=[root_mean_squared_error, mean_absolute_error, r2_score], cv = 5):
+def kfold_experiment_es(l_X, l_y, l_d_kan_params, l_d_train_params, l_func_metrics=[root_mean_squared_error, mean_absolute_error, r2_score], 
+                        cv = 5, l_y_scaler = 1, l_x_scaler = 1):
     '''
     Provides cross-validations to a KAN_es model to a list of model`s parameteres.
     
@@ -426,6 +458,10 @@ def kfold_experiment_es(l_X, l_y, l_d_kan_params, l_d_train_params, l_func_metri
             number of folds, seperating training and validation datasets
         l_func_metrics : List[callable]
             list of metrics for evaluating over test data.
+        l_y_scaler : list of skl scalers
+            scalers for reverse scaling of y for each experiment.
+        l_x_scaler : list of skl scalers
+            scalers for scaling x before training for each experiment.
             
     Returns:
         m_mean_metrics : np.array
@@ -433,8 +469,13 @@ def kfold_experiment_es(l_X, l_y, l_d_kan_params, l_d_train_params, l_func_metri
     '''
     l_mean_metrics, l_std_metrics = [], []
 
-    for X, y, d_kan_params, d_train_params in zip(l_X, l_y, l_d_kan_params, l_d_train_params):
-        m_metrics = cross_val_KAN_es(X, y, d_kan_params, d_train_params, cv=cv)
+    if l_y_scaler==1:
+        l_y_scaler = [1] * len(l_X)
+    if l_x_scaler==1:
+        l_x_scaler = [1] * len(l_X)
+        
+    for X, y, d_kan_params, d_train_params, y_scaler, x_scaler in zip(l_X, l_y, l_d_kan_params, l_d_train_params, l_y_scaler, l_x_scaler):
+        m_metrics = cross_val_KAN_es(X, y, d_kan_params, d_train_params, cv=cv, l_func_metrics=l_func_metrics, y_scaler=y_scaler, x_scaler=x_scaler)
 
         l_mean_metrics.append(m_metrics.mean(axis=1))
         l_std_metrics.append(m_metrics.std(axis=1))
